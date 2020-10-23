@@ -15,7 +15,7 @@ from tensorflow.keras.utils import plot_model
 
 class BeamSearch:
     
-    def __init__(self, network, beam_width=3, max_output_seq_len=10):
+    def __init__(self, network, beam_width=3, max_output_seq_len=5):
         self.beam_width = beam_width
         self.max_output_seq_len = max_output_seq_len
         self.network = network
@@ -47,9 +47,9 @@ class BeamSearch:
             number_of_elements = max(old_proba.shape)
         
         if new_probas is not None:
-            return (K.sum(K.log([old_proba])) + K.log([new_probas]))/number_of_elements
+            return (K.sum(K.log([old_proba])) + K.log([new_probas]))/(number_of_elements**alpha)
         else:
-            return (K.sum(K.log([old_proba])))/len(old_proba)
+            return (K.sum(K.log([old_proba])))/(len(old_proba)**alpha)
          
     
     def _get_top_k(self, dense_out):
@@ -108,7 +108,8 @@ class BeamSearch:
             next_internal_state.append(new_internal_state)
             decoder_dense_out_squeezed = self.squeeze_dimentions(decoder_dense_out)
             _local_dense_out.append(decoder_dense_out_squeezed)
-            new_combined_proba = self.calculate_combined_probability(np.array([prev_prob]), decoder_dense_out_squeezed)
+            new_combined_proba = self.calculate_combined_probability(old_proba=np.array(prev_prob),
+                                                                     new_probas=decoder_dense_out_squeezed)
             _local_proba_list.append(new_combined_proba)
             
         #next_proba_list = 50,50,50
@@ -117,12 +118,13 @@ class BeamSearch:
         next_proba_concat = tf.concat(_local_proba_list, axis=0)
         top_k_indexes, top_k_probs = self._get_top_k(next_proba_concat)
         
+        
         for i, ind in enumerate(top_k_indexes):
-            which_old_word_in_input_list = ind//vocab_size
-            old_words_reference_index.append(which_old_word_in_input_list.numpy())
-            which_index = ind%vocab_size
+            which_old_word_in_input_list = (ind//vocab_size).numpy()
+            old_words_reference_index.append(which_old_word_in_input_list)
+            which_index = (ind%vocab_size).numpy()
             next_words_list.append([prev_words[which_old_word_in_input_list], which_index])
-            next_proba_list.append([prev_probs[which_old_word_in_input_list], _local_dense_out[which_old_word_in_input_list][which_index]])
+            next_proba_list.append(prev_probs[which_old_word_in_input_list] + [_local_dense_out[which_old_word_in_input_list][which_index].numpy()])
             #next_internal_state.append(_local_internal_states[which_old_word_in_input_list])
         return next_words_list, next_proba_list, next_internal_state, old_words_reference_index
     
@@ -138,7 +140,8 @@ class BeamSearch:
     
     def iterate(self):
         for seq_no in range(1, self.max_output_seq_len):
-            #if seq_no == 2:
+            
+            #if seq_no >= 2:
             #    import pdb; pdb.set_trace()
             local_word_list = [word_list[-1] for word_list in self.final_words.values()]
             local_proba_list = [proba_list for proba_list in self.final_probs.values()]
@@ -147,11 +150,10 @@ class BeamSearch:
             local_word_list, local_proba_list, local_internal_states, old_words_reference_index = self.get_next_words(local_word_list, 
                                                                                            local_proba_list,
                                                                                           local_internal_states)
-
             local_word_list = [self.convert_to_numpy(lst[-1]) for lst in local_word_list]
             local_proba_list = [self.convert_to_numpy(lst[-1]) for lst in local_proba_list]
 
-
+            
             for i, val in enumerate(old_words_reference_index):
                 self.final_words[i] = self.final_words[val].copy()
                 self.final_probs[i] = self.final_probs[val].copy()
@@ -164,7 +166,12 @@ class BeamSearch:
                 if local_word_list[i] == self.network.eos_token:
                     self.final_sequence.append((self.final_words[i][:-1], 
                                                 self.calculate_combined_probability(old_proba=self.final_probs[i]).numpy()))
-                    
+            
+        #Finally append all the three seq to list
+        for i, value_list in enumerate(self.final_words.values()):
+            self.final_sequence = self.final_sequence + [(value_list, 
+                                                          self.calculate_combined_probability(old_proba=self.final_probs[i]).numpy())]
+                
                     
     def return_best_seq(self, k=1):
         final_probas = np.zeros((1, len(self.final_sequence)))
@@ -186,9 +193,9 @@ class BeamSearch:
                                                                                    tokenizer_inputs=tokenizer_inputs,
                                                                                    max_len_input=max_len_input)
         
-        
+
         if not isinstance(next_internal_state[0], list):
-            next_internal_state = [next_internal_state]*3
+            next_internal_state = [next_internal_state]*self.beam_width
         
         next_words_list = self._convert_array_to_list(next_words_list)
         next_proba_list = self._convert_array_to_list(next_proba_list)
